@@ -15,14 +15,26 @@ from solders.pubkey import Pubkey as PublicKey
 from solana.rpc.types import TokenAccountOpts
 from solana.rpc.commitment import Confirmed
 import json
+import csv
+from datetime import datetime
+import os
 
 
 @dataclass
 class TokenHolder:
-    address: str
+    address: str  # Token account address
+    owner: str    # Owner wallet address
     balance: int
     percentage: float
     account_type: str  # "user" or "program"
+
+
+@dataclass
+class SnapshotInfo:
+    """Information about when the snapshot was taken"""
+    block_number: int
+    timestamp: datetime
+    slot: int
 
 
 class SolanaTokenAnalyzer:
@@ -32,6 +44,31 @@ class SolanaTokenAnalyzer:
     async def close(self):
         """Close the RPC client"""
         await self.client.close()
+    
+    async def get_snapshot_info(self) -> SnapshotInfo:
+        """Get current block information for snapshot metadata"""
+        try:
+            # Get current slot
+            slot_response = await self.client.get_slot()
+            slot = slot_response.value
+            
+            # Get block time (Unix timestamp)
+            block_time_response = await self.client.get_block_time(slot)
+            timestamp = datetime.fromtimestamp(block_time_response.value) if block_time_response.value else datetime.now()
+            
+            return SnapshotInfo(
+                block_number=slot,  # In Solana, slot is equivalent to block number
+                timestamp=timestamp,
+                slot=slot
+            )
+        except Exception as e:
+            # Fallback to current time if we can't get block info
+            print(f"⚠️  Warning: Could not get block info, using current time: {e}")
+            return SnapshotInfo(
+                block_number=0,
+                timestamp=datetime.now(),
+                slot=0
+            )
     
     async def get_token_supply(self, mint_address: str) -> int:
         """Get total supply of the token"""
@@ -44,22 +81,106 @@ class SolanaTokenAnalyzer:
         except Exception as e:
             raise Exception(f"Failed to get token supply: {e}")
     
-    async def get_token_accounts(self, mint_address: str) -> List[Dict]:
-        """Get largest token accounts for a given mint"""
+    async def get_token_accounts_with_owners(self, mint_address: str) -> List[Dict]:
+        """Get token accounts and their owners for a given mint"""
         try:
             mint_pubkey = PublicKey.from_string(mint_address)
             
-            # Get largest token accounts for this mint (top 20 by default)
+            # First try to get token accounts by mint (more detailed info)
+            try:
+                response = await self.client.get_token_accounts_by_mint(
+                    mint_pubkey,
+                    commitment=Confirmed
+                )
+                
+                if response.value:
+                    accounts_with_owners = []
+                    for account_info in response.value:
+                        if account_info.account and account_info.account.data:
+                            parsed_data = account_info.account.data.parsed
+                            if parsed_data and 'info' in parsed_data:
+                                info = parsed_data['info']
+                                accounts_with_owners.append({
+                                    'account_address': str(account_info.pubkey),
+                                    'owner': info.get('owner', ''),
+                                    'amount': int(info.get('tokenAmount', {}).get('amount', 0))
+                                })
+                    return accounts_with_owners
+            except Exception as e:
+                print(f"⚠️  get_token_accounts_by_mint failed: {e}")
+            
+            # Fallback to largest accounts (less detailed but more reliable)
+            print("🔄 Falling back to largest accounts method...")
             response = await self.client.get_token_largest_accounts(
                 mint_pubkey,
                 commitment=Confirmed
             )
             
             if response.value:
-                return response.value
+                # For largest accounts, we need to get account info for each to find owners
+                accounts_with_owners = []
+                print(f"🔍 Getting owner info for {len(response.value)} accounts...")
+                
+                for i, account in enumerate(response.value):
+                    try:
+                        account_address = str(account.address)
+                        
+                        # Get account info to find the owner
+                        account_pubkey = PublicKey.from_string(account_address)
+                        account_info = await self.client.get_account_info(account_pubkey)
+                        
+                        if account_info.value and account_info.value.data:
+                            # Parse token account data to get owner
+                            try:
+                                # Token accounts are owned by the Token Program
+                                # The actual wallet owner is stored in the account data
+                                import base64
+                                import struct
+                                
+                                data = account_info.value.data
+                                if len(data) >= 32:  # Token account data structure
+                                    # Owner is bytes 32-64 in token account data
+                                    owner_bytes = data[32:64]
+                                    owner_pubkey = PublicKey(owner_bytes)
+                                    owner = str(owner_pubkey)
+                                else:
+                                    owner = str(account_info.value.owner)
+                            except Exception:
+                                owner = str(account_info.value.owner)
+                        else:
+                            owner = "Unknown"
+                        
+                        # Handle different amount types
+                        if hasattr(account.amount, 'amount'):
+                            balance = int(account.amount.amount)
+                        else:
+                            balance = int(account.amount)
+                        
+                        accounts_with_owners.append({
+                            'account_address': account_address,
+                            'owner': owner,
+                            'amount': balance
+                        })
+                        
+                        if (i + 1) % 5 == 0:
+                            print(f"  Processed {i + 1}/{len(response.value)} accounts")
+                            
+                    except Exception as e:
+                        print(f"⚠️  Failed to get owner for account {account.address}: {e}")
+                        # Add with unknown owner
+                        balance = int(account.amount.amount) if hasattr(account.amount, 'amount') else int(account.amount)
+                        accounts_with_owners.append({
+                            'account_address': str(account.address),
+                            'owner': 'Unknown',
+                            'amount': balance
+                        })
+                
+                return accounts_with_owners
+            
             return []
+            
         except Exception as e:
-            # If largest accounts fails, it might be due to:
+            # If all methods fail, it might be due to:
             # - Token has no holders
             # - Token is too small/new
             # - API limitations
@@ -127,67 +248,57 @@ class SolanaTokenAnalyzer:
         
         print(f"📊 Total supply: {total_supply:,}")
         
-        # Get all token accounts
-        token_accounts = await self.get_token_accounts(mint_address)
+        # Get all token accounts with their owners
+        token_accounts = await self.get_token_accounts_with_owners(mint_address)
         if not token_accounts:
             raise Exception("No token accounts found")
         
         print(f"🏦 Found {len(token_accounts)} token accounts")
         
-        # Group by owner and sum balances
-        owner_balances: Dict[str, int] = {}
+        # Group by owner and track account details
+        owner_data: Dict[str, Dict] = {}
         
         for account in token_accounts:
             try:
-                # Handle different response structures
-                if hasattr(account, 'address') and hasattr(account, 'amount'):
-                    # Structure from get_token_largest_accounts
-                    owner = str(account.address)
-                    
-                    # Handle different amount types
-                    if hasattr(account.amount, 'amount'):
-                        # UiTokenAmount object with .amount attribute
-                        balance = int(account.amount.amount)
-                    else:
-                        # Direct string amount
-                        balance = int(account.amount)
-                        
-                elif hasattr(account, 'account'):
-                    # Old structure from get_token_accounts_by_mint
-                    account_data = account.account.data.parsed
-                    owner = account_data["info"]["owner"]
-                    balance = int(account_data["info"]["tokenAmount"]["amount"])
-                else:
-                    print(f"⚠️  Warning: Unknown account structure: {account}")
-                    print(f"   Available attributes: {[attr for attr in dir(account) if not attr.startswith('_')]}")
-                    continue
+                account_address = account['account_address']
+                owner = account['owner']
+                balance = account['amount']
                 
                 if balance > 0:  # Only include accounts with positive balance
-                    if owner in owner_balances:
-                        owner_balances[owner] += balance
+                    if owner in owner_data:
+                        owner_data[owner]['total_balance'] += balance
+                        owner_data[owner]['account_addresses'].append(account_address)
                     else:
-                        owner_balances[owner] = balance
+                        owner_data[owner] = {
+                            'total_balance': balance,
+                            'account_addresses': [account_address],
+                            'primary_account': account_address  # Store the first/largest account
+                        }
             except Exception as e:
                 print(f"⚠️  Warning: Failed to process account: {e}")
                 continue
         
         # Create holder objects with account type detection
         holders = []
-        total_holders = len(owner_balances)
+        total_holders = len(owner_data)
         
-        print(f"🔎 Checking account types for {total_holders} unique holders...")
+        print(f"🔎 Checking account types for {total_holders} unique owners...")
         
-        for i, (owner, balance) in enumerate(owner_balances.items(), 1):
+        for i, (owner, data) in enumerate(owner_data.items(), 1):
             if i % 10 == 0 or i == total_holders:
                 print(f"  Progress: {i}/{total_holders}")
             
-            percentage = (balance / total_supply) * 100
+            percentage = (data['total_balance'] / total_supply) * 100
             is_program = await self.is_program_account(owner)
             account_type = "program" if is_program else "user"
             
+            # Use the primary account address (first one) for display
+            primary_account = data['primary_account']
+            
             holders.append(TokenHolder(
-                address=owner,
-                balance=balance,
+                address=primary_account,  # Token account address
+                owner=owner,              # Owner wallet address
+                balance=data['total_balance'],
                 percentage=percentage,
                 account_type=account_type
             ))
@@ -196,6 +307,47 @@ class SolanaTokenAnalyzer:
         holders.sort(key=lambda x: x.percentage, reverse=True)
         
         return holders
+    
+    async def export_to_csv(self, holders: List[TokenHolder], mint_address: str, snapshot_info: SnapshotInfo, filename: Optional[str] = None) -> str:
+        """Export token holder data to CSV file"""
+        if not filename:
+            # Generate filename with timestamp
+            timestamp_str = snapshot_info.timestamp.strftime("%Y%m%d_%H%M%S")
+            short_mint = mint_address[:8]
+            filename = f"token_holders_{short_mint}_{timestamp_str}.csv"
+        
+        # Ensure the filename has .csv extension
+        if not filename.endswith('.csv'):
+            filename += '.csv'
+        
+        with open(filename, 'w', newline='', encoding='utf-8') as csvfile:
+            writer = csv.writer(csvfile)
+            
+            # Write metadata header
+            writer.writerow(['# Token Holder Analysis Export'])
+            writer.writerow(['# Mint Address:', mint_address])
+            writer.writerow(['# Snapshot Block:', snapshot_info.block_number])
+            writer.writerow(['# Snapshot Slot:', snapshot_info.slot])
+            writer.writerow(['# Snapshot Time:', snapshot_info.timestamp.isoformat()])
+            writer.writerow(['# Export Time:', datetime.now().isoformat()])
+            writer.writerow(['# Total Holders:', len(holders)])
+            writer.writerow([])  # Empty row for separation
+            
+            # Write data headers
+            writer.writerow(['Rank', 'Token_Account', 'Owner_Address', 'Balance', 'Percentage', 'Account_Type'])
+            
+            # Write holder data
+            for i, holder in enumerate(holders, 1):
+                writer.writerow([
+                    i,
+                    holder.address,    # Token account address
+                    holder.owner,      # Owner wallet address
+                    holder.balance,
+                    f"{holder.percentage:.6f}",
+                    holder.account_type
+                ])
+        
+        return filename
 
 
 async def main():
@@ -294,7 +446,13 @@ async def main():
               help='Starting rank (1-based index)')
 @click.option('--end', '-e', default=None, type=int,
               help='Ending rank (1-based index, inclusive)')
-def cli_main(mint: Optional[str], rpc: str, limit: int, start: Optional[int], end: Optional[int]):
+@click.option('--csv', '-c', is_flag=True,
+              help='Export to CSV file with auto-generated filename')
+@click.option('--csv-file', default=None, type=str,
+              help='Export to CSV with custom filename')
+@click.option('--csv-only', is_flag=True,
+              help='Only export CSV, skip console output')
+def cli_main(mint: Optional[str], rpc: str, limit: int, start: Optional[int], end: Optional[int], csv: bool, csv_file: Optional[str], csv_only: bool):
     """Solana Token Holder Analyzer CLI"""
     
     if mint:
@@ -303,7 +461,28 @@ def cli_main(mint: Optional[str], rpc: str, limit: int, start: Optional[int], en
         
         async def analyze():
             try:
+                # Get snapshot info first
+                snapshot_info = await analyzer.get_snapshot_info()
+                
                 holders = await analyzer.analyze_token_holders(mint)
+                
+                # Handle CSV export
+                csv_filename = None
+                if csv or csv_file or csv_only:
+                    csv_filename = await analyzer.export_to_csv(holders, mint, snapshot_info, csv_file)
+                    print(f"💾 Exported to: {csv_filename}")
+                
+                # Skip console output if csv_only flag is set
+                if csv_only:
+                    print(f"✅ CSV export complete: {len(holders)} holders exported")
+                    return
+                
+                # Display snapshot information
+                print(f"\n📊 SNAPSHOT INFORMATION")
+                print("-" * 40)
+                print(f"Block/Slot: {snapshot_info.block_number}")
+                print(f"Timestamp: {snapshot_info.timestamp.strftime('%Y-%m-%d %H:%M:%S UTC')}")
+                print(f"ISO Time: {snapshot_info.timestamp.isoformat()}")
                 
                 # Determine which holders to display
                 if start is not None or end is not None:
@@ -324,25 +503,47 @@ def cli_main(mint: Optional[str], rpc: str, limit: int, start: Optional[int], en
                     display_holders = holders[:limit]
                     range_info = f"top {len(display_holders)}"
                 
+                print(f"\n🎯 TOKEN HOLDER ANALYSIS: {mint}")
+                print("=" * 80)
+                
                 table_data = []
                 for i, holder in enumerate(display_holders):
                     actual_rank = (start - 1 if start else 0) + i + 1  # Calculate actual rank
                     balance_str = f"{holder.balance:,}"
                     percentage_str = f"{holder.percentage:.6f}%"
-                    address_display = holder.address
+                    
+                    # Truncate addresses for display
+                    token_account_display = f"{holder.address[:8]}...{holder.address[-8:]}"
+                    owner_display = f"{holder.owner[:8]}...{holder.owner[-8:]}"
                     
                     table_data.append([
                         actual_rank,
-                        address_display,
+                        token_account_display,
+                        owner_display,
                         balance_str,
                         percentage_str,
                         holder.account_type.upper()
                     ])
                 
-                headers = ["Rank", "Address", "Balance", "Ownership %", "Type"]
+                headers = ["Rank", "Token Account", "Owner", "Balance", "Ownership %", "Type"]
                 print(tabulate(table_data, headers=headers, tablefmt="grid"))
                 
                 print(f"\nShowing {range_info} of {len(holders)} total holders")
+                
+                # Summary statistics
+                print(f"\n📈 SUMMARY")
+                print("-" * 40)
+                print(f"Total holders: {len(holders):,}")
+                user_count = sum(1 for h in holders if h.account_type == "user")
+                program_count = len(holders) - user_count
+                print(f"User accounts: {user_count:,}")
+                print(f"Program accounts: {program_count:,}")
+                
+                total_percentage = sum(h.percentage for h in holders)
+                print(f"Total ownership tracked: {total_percentage:.2f}%")
+                
+                if csv_filename:
+                    print(f"\n💾 Data exported to: {csv_filename}")
                 
             except Exception as e:
                 print(f"❌ Error: {e}")

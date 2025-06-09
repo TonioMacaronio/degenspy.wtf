@@ -18,42 +18,49 @@ async def demo_with_mock_data():
     mock_holders = [
         TokenHolder(
             address="5Q544fKyKrfqJQv2Lmj8m4EZhLLjSeFdRBJ8XXvKK7Rj8",
+            owner="9WzDXwHNVqhMGNB4mN2Wnfyp6ZjXsF8kJ7Kb3KLmm4mN2",
             balance=1000000000,
             percentage=45.5,
             account_type="user"
         ),
         TokenHolder(
-            address="9WzDXwHNVqhMGNB4mN2Wnfyp6ZjXsF8kJ7Kb3KLmm4mN2",
+            address="3Hx8qP7NyYyRF5Lm9KjT2VpQx4YkD6sG8mN1oP2Qr5Ss7",
+            owner="TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA",
             balance=500000000,
             percentage=22.7,
             account_type="program"
         ),
         TokenHolder(
-            address="3Hx8qP7NyYyRF5Lm9KjT2VpQx4YkD6sG8mN1oP2Qr5Ss7",
+            address="7dHbWXmci3dT1aHLVFbvQJN5BZQC7LzUJZ9V8k3KaP5X",
+            owner="2vb8kM9qYm7sP4XtLcN6Fg8dR3BxTw5KpN7Q9h4L8mX3",
             balance=300000000,
             percentage=13.6,
             account_type="user"
         ),
         TokenHolder(
-            address="7dHbWXmci3dT1aHLVFbvQJN5BZQC7LzUJZ9V8k3KaP5X",
+            address="8mN2sP5vT9wX7fK3qH6B4cL8dR5eY7nA1pU9tJ2iO4sX",
+            owner="ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL",
             balance=200000000,
             percentage=9.1,
             account_type="program"
         ),
         TokenHolder(
-            address="2vb8kM9qYm7sP4XtLcN6Fg8dR3BxTw5KpN7Q9h4L8mX3",
+            address="4pQ7rX3fN8kL9dB6mY2cW5vH1sT8eJ4iN6uA7gR3oP2X",
+            owner="1nc1nerator11111111111111111111111111111111",
             balance=100000000,
             percentage=4.5,
             account_type="user"
         ),
         TokenHolder(
-            address="8mN2sP5vT9wX7fK3qH6B4cL8dR5eY7nA1pU9tJ2iO4sX",
+            address="6dHbWXmci3dT1aHLVFbvQJN5BZQC7LzUJZ9V8k3KaP5Z",
+            owner="burn1111111111111111111111111111111111111111",
             balance=75000000,
             percentage=3.4,
             account_type="user"
         ),
         TokenHolder(
-            address="4pQ7rX3fN8kL9dB6mY2cW5vH1sT8eJ4iN6uA7gR3oP2X",
+            address="1pQ7rX3fN8kL9dB6mY2cW5vH1sT8eJ4iN6uA7gR3oP2Y",
+            owner="JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4",
             balance=25000000,
             percentage=1.1,
             account_type="program"
@@ -74,12 +81,14 @@ async def demo_with_mock_data():
         balance_str = f"{holder.balance:,}"
         percentage_str = f"{holder.percentage:.6f}%"
         
-        # Truncate address for display
-        address_display = f"{holder.address[:8]}...{holder.address[-8:]}"
+        # Truncate addresses for display
+        token_account_display = f"{holder.address[:8]}...{holder.address[-8:]}"
+        owner_display = f"{holder.owner[:8]}...{holder.owner[-8:]}"
         
         table_data.append([
             i,
-            address_display,
+            token_account_display,
+            owner_display,
             balance_str,
             percentage_str,
             holder.account_type.upper()
@@ -95,7 +104,7 @@ async def demo_with_mock_data():
     print(f"🎯 TOKEN HOLDER ANALYSIS: ExampleToken123456789")
     print("=" * 60)
     
-    headers = ["Rank", "Address", "Balance", "Ownership %", "Type"]
+    headers = ["Rank", "Token Account", "Owner", "Balance", "Ownership %", "Type"]
     print(tabulate(table_data, headers=headers, tablefmt="grid"))
     
     # Summary statistics
